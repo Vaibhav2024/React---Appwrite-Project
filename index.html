@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gesture Racer</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: 'Segoe UI', sans-serif; }
+        
+        /* UI Overlay */
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; display: flex; flex-direction: column; justify-content: space-between;
+        }
+        #score-board {
+            text-align: center; padding-top: 20px; color: #00ffcc;
+            font-size: 40px; font-weight: bold; text-shadow: 0 0 10px #00ffcc;
+        }
+        #instructions {
+            text-align: center; color: white; margin-bottom: 20px;
+            font-size: 18px; text-shadow: 1px 1px 2px black;
+        }
+        #game-over {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            text-align: center; display: none; pointer-events: auto;
+            background: rgba(0,0,0,0.8); padding: 40px; border-radius: 10px; border: 2px solid #00ffcc;
+        }
+        button {
+            background: #00ffcc; color: black; border: none; padding: 15px 30px;
+            font-size: 20px; cursor: pointer; font-weight: bold; margin-top: 20px;
+        }
+        button:hover { background: white; }
+
+        /* Hidden Video & Debug */
+        #input_video { display: none; }
+        
+        /* Virtual Steering Wheel Visualization */
+        #steering-wheel-container {
+            position: absolute; bottom: 50px; right: 50px;
+            width: 100px; height: 100px; z-index: 20;
+            opacity: 0.8;
+        }
+        #virtual-wheel {
+            width: 100%; height: 100%;
+            border: 8px solid #00ffcc; border-radius: 50%;
+            box-shadow: 0 0 10px #00ffcc;
+            position: relative;
+            transform-origin: center center;
+            transition: transform 0.1s;
+        }
+        #virtual-wheel::after {
+            content: ''; position: absolute; top: 0; left: 45%;
+            width: 10%; height: 20%; background: #00ffcc;
+        }
+    </style>
+
+    <!-- MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <!-- UI Elements -->
+    <div id="ui-layer">
+        <div id="score-board">SCORE: 0</div>
+        <div id="instructions">Hold invisible steering wheel with TWO hands to drive</div>
+    </div>
+
+    <!-- Game Over Screen -->
+    <div id="game-over">
+        <h1 style="color:white; margin:0;">CRASHED!</h1>
+        <h2 id="final-score" style="color:#00ffcc;">Score: 0</h2>
+        <button onclick="resetGame()">PLAY AGAIN</button>
+    </div>
+
+    <!-- Steering Visualizer -->
+    <div id="steering-wheel-container">
+        <div id="virtual-wheel"></div>
+    </div>
+
+    <video id="input_video"></video>
+
+    <!-- Three.js -->
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- GAME VARIABLES ---
+        let gameActive = true;
+        let score = 0;
+        let speed = 0.5;
+        let steeringInput = 0; // -1 (Left) to 1 (Right)
+        
+        // --- THREE.JS SETUP ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a1a);
+        scene.fog = new THREE.Fog(0x1a1a1a, 20, 100); // Hides the end of the world
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 3, 6);
+        camera.rotation.x = -0.3;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // Lights
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(10, 20, 10);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+
+        // --- BUILD THE CAR ---
+        const carGroup = new THREE.Group();
+        
+        // Car Body
+        const chassisGeo = new THREE.BoxGeometry(1.2, 0.5, 2.5);
+        const chassisMat = new THREE.MeshStandardMaterial({ color: 0x0088ff, roughness: 0.2 });
+        const chassis = new THREE.Mesh(chassisGeo, chassisMat);
+        chassis.position.y = 0.5;
+        chassis.castShadow = true;
+        carGroup.add(chassis);
+
+        // Car Cabin
+        const cabinGeo = new THREE.BoxGeometry(1, 0.4, 1.2);
+        const cabinMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+        const cabin = new THREE.Mesh(cabinGeo, cabinMat);
+        cabin.position.set(0, 1.0, -0.2);
+        carGroup.add(cabin);
+
+        // Wheels
+        const wheelGeo = new THREE.CylinderGeometry(0.3, 0.3, 0.2, 16);
+        const wheelMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+        const wheels = [
+            { x: -0.6, z: 0.8 }, { x: 0.6, z: 0.8 }, // Front
+            { x: -0.6, z: -0.8 }, { x: 0.6, z: -0.8 } // Back
+        ];
+        wheels.forEach(pos => {
+            const w = new THREE.Mesh(wheelGeo, wheelMat);
+            w.rotation.z = Math.PI / 2;
+            w.position.set(pos.x, 0.3, pos.z);
+            carGroup.add(w);
+        });
+
+        // Tail lights (Glowing)
+        const tailGeo = new THREE.BoxGeometry(0.2, 0.1, 0.1);
+        const tailMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        const tl = new THREE.Mesh(tailGeo, tailMat); tl.position.set(-0.4, 0.6, 1.25);
+        const tr = new THREE.Mesh(tailGeo, tailMat); tr.position.set(0.4, 0.6, 1.25);
+        carGroup.add(tl); carGroup.add(tr);
+
+        scene.add(carGroup);
+
+        // --- BUILD THE WORLD (GRID FLOOR) ---
+        const gridHelper = new THREE.GridHelper(200, 100, 0x00ffcc, 0x333333);
+        scene.add(gridHelper);
+
+        const movingPlaneGeo = new THREE.PlaneGeometry(200, 200);
+        const movingPlaneMat = new THREE.MeshBasicMaterial({ color: 0x222222 });
+        const floor = new THREE.Mesh(movingPlaneGeo, movingPlaneMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.y = -0.1;
+        scene.add(floor);
+
+        // --- OBSTACLES ---
+        const obstacles = [];
+        const obGeo = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+        const obMat = new THREE.MeshStandardMaterial({ color: 0xff0044, roughness: 0.1 });
+
+        function spawnObstacle() {
+            const mesh = new THREE.Mesh(obGeo, obMat);
+            // Random X position between -8 and 8
+            mesh.position.x = (Math.random() * 16) - 8;
+            mesh.position.y = 0.75;
+            mesh.position.z = -100; // Start far away
+            mesh.castShadow = true;
+            scene.add(mesh);
+            obstacles.push(mesh);
+        }
+
+        // Initial spawn
+        for(let i=0; i<5; i++) {
+            spawnObstacle();
+            obstacles[i].position.z = -20 - (i * 20);
+        }
+
+        // --- MEDIAPIPE HAND TRACKING ---
+        const videoElement = document.getElementById('input_video');
+        const wheelVisual = document.getElementById('virtual-wheel');
+
+        function onResults(results) {
+            if (!results.multiHandLandmarks || results.multiHandLandmarks.length < 2) {
+                // Not enough hands detected, neutralize steering
+                steeringInput = steeringInput * 0.9; // Decay
+                wheelVisual.style.transform = `rotate(0deg)`;
+                return;
+            }
+
+            // We need 2 hands. Let's find their average X and Y positions.
+            const hands = results.multiHandLandmarks;
+            
+            // Heuristic: The hand with the smaller X value (on screen) is the "Left" hand
+            // Note: Webcam is mirrored usually. 
+            // Let's just take the first two hands found.
+            
+            const handA = hands[0][9]; // Middle finger knuckle (stable point)
+            const handB = hands[1][9];
+
+            // Determine which is left and which is right based on X coord
+            let leftHand, rightHand;
+            if (handA.x < handB.x) {
+                leftHand = handA; rightHand = handB;
+            } else {
+                leftHand = handB; rightHand = handA;
+            }
+
+            // Calculate angle between hands
+            // Y is inverted in MediaPipe (0 is top, 1 is bottom)
+            const dy = rightHand.y - leftHand.y;
+            const dx = rightHand.x - leftHand.x;
+            
+            // Calculate angle in radians
+            const angle = Math.atan2(dy, dx);
+            
+            // Map angle to steering input
+            // If hands are level, angle is 0.
+            // If turning left (imaginary wheel), left hand goes down (high Y), right goes up (low Y).
+            // This results in a negative dy.
+            
+            // Sensitivity factor
+            const degree = angle * (180 / Math.PI);
+            
+            // Invert logic because of screen coordinates
+            // Normal wheel: Left down = Turn Left.
+            // Screen Y: Down is positive. Left Hand Y > Right Hand Y => Positive diff.
+            
+            // Let's simplify:
+            // diffY > 0 : Left is lower than right -> Turning Left? 
+            // Actually, simulate holding a wheel:
+            // Turn Left -> Left hand moves down, Right hand moves up.
+            
+            // Let's just map the raw rotation directly
+            // Clamp rotation between -45 and 45 degrees
+            let steer = degree; 
+            if (steer > 45) steer = 45;
+            if (steer < -45) steer = -45;
+
+            // Update UI Wheel
+            wheelVisual.style.transform = `rotate(${steer}deg)`;
+
+            // Normalize to -1 to 1 for game logic
+            // Note: Depending on mirroring, we might need to invert sign.
+            // Usually webcam is mirrored. If I tilt left (physically), on screen it looks like tilt right.
+            // Let's try direct mapping first.
+            steeringInput = steer / 45; 
+        }
+
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 640, height: 480
+        });
+        cameraUtils.start();
+
+        // --- GAME LOGIC ---
+
+        function checkCollision() {
+            const carBox = new THREE.Box3().setFromObject(chassis);
+            // Shrink hit box slightly to be forgiving
+            carBox.expandByScalar(-0.2); 
+
+            for (let obs of obstacles) {
+                const obBox = new THREE.Box3().setFromObject(obs);
+                if (carBox.intersectsBox(obBox)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (!gameActive) return;
+
+            // 1. Move Obstacles (Simulate Forward movement)
+            speed += 0.0001; // Accelerate slowly
+            
+            // Move grid visual effect
+            gridHelper.position.z += speed;
+            if (gridHelper.position.z > 10) gridHelper.position.z = 0;
+
+            obstacles.forEach(obs => {
+                obs.position.z += speed;
+                
+                // Reset obstacle if it passes camera
+                if (obs.position.z > 10) {
+                    obs.position.z = -100 - (Math.random() * 20);
+                    obs.position.x = (Math.random() * 14) - 7;
+                    score += 10;
+                    document.getElementById('score-board').innerText = "SCORE: " + score;
+                }
+            });
+
+            // 2. Car Steering Physics
+            // Smooth steering
+            const maxLean = 0.5;
+            carGroup.rotation.z = -steeringInput * 0.3; // Lean the car body
+            carGroup.rotation.y = -steeringInput * 0.2; // Slight turn angle
+
+            // Move Car Left/Right
+            carGroup.position.x -= steeringInput * 0.2; // Invert or not depending on feel
+            
+            // Clamp road boundaries
+            if (carGroup.position.x > 9) carGroup.position.x = 9;
+            if (carGroup.position.x < -9) carGroup.position.x = -9;
+
+            // 3. Collision Check
+            if (checkCollision()) {
+                gameOver();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function gameOver() {
+            gameActive = false;
+            document.getElementById('game-over').style.display = 'block';
+            document.getElementById('final-score').innerText = "Score: " + score;
+        }
+
+        window.resetGame = function() {
+            score = 0;
+            speed = 0.5;
+            carGroup.position.x = 0;
+            document.getElementById('score-board').innerText = "SCORE: 0";
+            document.getElementById('game-over').style.display = 'none';
+            
+            // Reset obstacles
+            obstacles.forEach((obs, i) => {
+                obs.position.z = -20 - (i * 20);
+                obs.position.x = (Math.random() * 16) - 8;
+            });
+
+            gameActive = true;
+        }
+
+        animate();
+
+        // Resize handler
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
+</body>
+</html>
